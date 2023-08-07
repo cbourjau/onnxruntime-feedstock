@@ -62,8 +62,8 @@ requirements:
     - python-flatbuffers
     - optional-lite
     - zlib
-    - numpy 1.21.6  # [py<310]
-    - numpy         # [py>=310]
+    - numpy 1.21.6  # [(build_platform != target_platform) and py<310]
+    - numpy         # [(build_platform != target_platform) and py>=310]
     - pybind11
   run:
     - coloredlogs

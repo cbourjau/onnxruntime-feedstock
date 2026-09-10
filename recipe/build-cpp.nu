@@ -137,9 +137,9 @@ if $cuda_enabled {
 # Configure only (--update); build.py generates the cache + Ninja tree.
 python tools/ci_build/build.py ...$build_py_args --cmake_extra_defines ...$cmake_defines
 
-# Build and install the C++ library, reusing build.py's cache. The artifacts stay
-# in place for the per-Python stage, which rebuilds only the pybind11 module.
-cmake --build build-ci/Release --config Release --parallel $env.CPU_COUNT
+# Build and install the C++ library. Limit CPU count to avoid OOMs.
+let build_jobs = [($env.CPU_COUNT | into int) 8] | math min
+cmake --build build-ci/Release --config Release --parallel $build_jobs
 
 if not $cross_compiling {
     ctest -V -C Release --test-dir build-ci/Release

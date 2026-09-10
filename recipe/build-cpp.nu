@@ -100,8 +100,11 @@ if $cuda_enabled {
         }
     }
     $env.NINJAJOBS = "1"
-    # Limit nvcc parallelism; Windows CUDA 13.0 builds run out of memory otherwise
-    $cmake_defines = ($cmake_defines | append "-Donnxruntime_NVCC_THREADS=2")
+    # The fpA_intB_gemm/fpA_intB_gemv cutlass kernels added in 1.29.0 need several GB
+    # of RAM per architecture in nvcc, and the arch lists ask for up to eight of them.
+    # Compile one architecture at a time per translation unit so peak memory scales
+    # with --parallel alone and the runners don't OOM (exit 137).
+    $cmake_defines = ($cmake_defines | append "-Donnxruntime_NVCC_THREADS=1")
 
     if $is_win {
         let build_lib_prefix = $"($env.BUILD_PREFIX)/Library"

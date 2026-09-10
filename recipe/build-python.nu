@@ -1,4 +1,3 @@
-let is_win = ($env.target_platform | str starts-with "win")
 let is_linux = ($env.target_platform | str starts-with "linux")
 let cross_compiling = ($env.CONDA_BUILD_CROSS_COMPILATION? | default "0") == "1"
 let cuda_enabled = (($env.cuda_compiler_version? | default "None") != "None")
@@ -42,7 +41,7 @@ let plat_args = if $cross_compiling {
     []
 }
 
-python $"($env.SRC_DIR)/setup.py" bdist_wheel ...$plat_args ...$plat_args
+python $"($env.SRC_DIR)/setup.py" bdist_wheel ...$plat_args
 
 # Install the wheel
 pip install ...(glob dist/*.whl) --no-deps --no-build-isolation $"--prefix=($env.PREFIX)"
@@ -59,12 +58,12 @@ if not $cross_compiling {
         --deselect onnxruntime/test/python/onnxruntime_test_python.py::TestInferenceSession::test_run_with_adapter
         --deselect onnxruntime/test/python/onnxruntime_test_python.py::TestInferenceSession::test_model_serialization_with_external_initializers_to_directory
         --deselect onnxruntime/test/python/onnxruntime_test_python.py::TestInferenceSession::test_model_serialization_with_original_external_initializers_to_directory
-	--deselect onnxruntime/test/python/onnxruntime_test_python.py::TestInferenceSession::test_register_custom_e_ps_library
+        --deselect onnxruntime/test/python/onnxruntime_test_python.py::TestInferenceSession::test_register_custom_e_ps_library
     ]
 
     # Deselect tests that require a CUDA device (CI runners have no GPU)
     if $cuda_enabled {
-        $deselect = ($deselect | append [
+        $deselect ++= [
             --deselect onnxruntime/test/python/onnxruntime_test_python.py::TestInferenceSession::test_get_and_set_tuning_results
             --deselect onnxruntime/test/python/onnxruntime_test_python.py::TestInferenceSession::test_ort_value
             --deselect onnxruntime/test/python/onnxruntime_test_python.py::TestInferenceSession::test_ort_value_gh_issue9799
@@ -74,7 +73,7 @@ if not $cross_compiling {
             --deselect onnxruntime/test/python/onnxruntime_test_python.py::TestInferenceSession::test_sparse_tensor_csr_format
             --deselect onnxruntime/test/python/onnxruntime_test_python_autoep.py::TestAutoEP::test_cuda_ep_register_and_inference
             --deselect onnxruntime/test/python/onnxruntime_test_python_autoep.py::TestAutoEP::test_cuda_ep_selection_delegate_and_inference
-        ])
+        ]
     }
 
     pytest -v ...$deselect ...[

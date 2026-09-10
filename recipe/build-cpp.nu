@@ -13,81 +13,86 @@ let cross_compiling = ($env.CONDA_BUILD_CROSS_COMPILATION? | default "0") == "1"
 
 let build_unit_tests = if $cross_compiling or $cuda_enabled { "OFF" } else { "ON" }
 let dont_vectorize = if (($env.suffix? | default "") | str contains "novec") { "ON" } else { "OFF" }
+let prefix_path = if $is_win { $env.LIBRARY_PREFIX } else { $env.PREFIX }
 
 # https://github.com/conda-forge/ctng-compiler-activation-feedstock/issues/143
 if $is_linux {
     $env.LDFLAGS = (($env.LDFLAGS? | default "") + " -Wl,-z,noexecstack")
 }
 
-# Explicitly provide Python and NumPy paths to cmake. See:
-# https://conda-forge.org/docs/how-to/advanced/cross-compilation/#finding-numpy-in-cross-compiled-python-packages-using-cmake
-let python_include_dir = (python -c "import sysconfig; print(sysconfig.get_path('include'))" | str trim)
-let numpy_include_dir = (python -c "import numpy; print(numpy.get_include())" | str trim)
-# $PYTHON points to the host env python which can't run during cross-compilation.
-let python_executable = if $cross_compiling { $"($env.BUILD_PREFIX)/bin/python" } else { $env.PYTHON }
+# --cmake_extra_defines entries (build.py prepends -D). Only defines build.py does
+# not derive itself; mirrors upstream recipe/build.sh.
+mut cmake_defines = [
+    "EIGEN_MPL2_ONLY=ON"
+    "FLATBUFFERS_BUILD_FLATC=OFF"
+    $"onnxruntime_DONT_VECTORIZE=($dont_vectorize)"
+    $"onnxruntime_BUILD_UNIT_TESTS=($build_unit_tests)"
+    $"CMAKE_PREFIX_PATH=($prefix_path)"
+    "CMAKE_CXX_STANDARD=20"
+    "CMAKE_INSTALL_LIBDIR=lib"
+]
 
-let forwarded_cmake_args = ($env.CMAKE_ARGS | split row " ")
+# Forward all of conda-forge's CMAKE_ARGS (toolchain, find-root, compiler archiver,
+# CUDA enhancements). build.py ignores CMAKE_ARGS, so strip the -D and pass each
+# through --cmake_extra_defines. Upstream forwards only -DCMAKE_SYSTEM_*, dropping
+# CMAKE_CXX_COMPILER_AR and thus silently disabling --enable_lto.
+$cmake_defines ++= ($env.CMAKE_ARGS
+    | split row " "
+    | where {|a| $a | str starts-with "-D"}
+    | each {|a| $a | str substring 2..})
 
-let prefix_path = if $is_win { $env.LIBRARY_PREFIX } else { $env.PREFIX }
-mut cmake_defines = ($forwarded_cmake_args | append [
-    $"-DCMAKE_PREFIX_PATH=($prefix_path)"
-    # 1.28.0 requires C++20; the C++20 module-scanning issues that once forced
-    # 17 are handled upstream via CMAKE_CXX_SCAN_FOR_MODULES=OFF
-    "-DCMAKE_CXX_STANDARD=20"
-    "-DCMAKE_INSTALL_LIBDIR=lib"
-    "-Donnxruntime_BUILD_SHARED_LIB=ON"
-    "-Donnxruntime_DISABLE_RTTI=OFF"
-    "-Donnxruntime_ENABLE_LTO=OFF"  # TODO
-    "-Donnxruntime_ENABLE_PYTHON=ON"  # Must be enabled to get the dlpack exports
-    "-Donnxruntime_USE_KLEIDIAI=ON"
-    "-Donnxruntime_USE_SVE=ON"
-    $"-Donnxruntime_BUILD_UNIT_TESTS=($build_unit_tests)"
-    $"-Donnxruntime_DONT_VECTORIZE=($dont_vectorize)"
-    "-DEIGEN_MPL2_ONLY=ON"
-    "-DFLATBUFFERS_BUILD_FLATC=OFF"
-    $"-DPython_EXECUTABLE:PATH=($python_executable)"
-    $"-DPython_INCLUDE_DIR:PATH=($python_include_dir)"
-    $"-DPython_NumPy_INCLUDE_DIR=($numpy_include_dir)"
-    "-DCMAKE_OSX_ARCHITECTURES=arm64"  # Ignored on non-apple platforms
-    "-DTHREADS_PREFER_PTHREAD_FLAG=ON"  # Ensure -pthread is used from the start, avoiding cache invalidation in Python stage
-])
-
-if $is_osx {
-    # Enable the CoreML execution provider on Apple Silicon (osx-x86_64 is
-    # skipped entirely). The CoreML EP is statically linked into libonnxruntime
-    # and exposed as the "CoreMLExecutionProvider".
-    $cmake_defines = ($cmake_defines | append "-Donnxruntime_USE_COREML=ON")
+# https://github.com/conda-forge/onnxruntime-feedstock/issues/57#issuecomment-1518033552
+if $is_win {
+    $cmake_defines ++= ["CMAKE_DISABLE_FIND_PACKAGE_Protobuf=ON"]
 }
 
-if $is_win {
-    # https://github.com/conda-forge/onnxruntime-feedstock/issues/57#issuecomment-1518033552
-    $cmake_defines = ($cmake_defines | append [
-        "-DCMAKE_DISABLE_FIND_PACKAGE_Protobuf=ON"
-        # Matches what upstream build.py does when enable_msvc_static_runtime is off.
-        "-Dprotobuf_MSVC_STATIC_RUNTIME=OFF"
-        "-DONNX_USE_MSVC_STATIC_RUNTIME=OFF"
-        "-DABSL_MSVC_STATIC_RUNTIME=OFF"
-        "-Dgtest_force_shared_crt=ON"
-    ])
-} else {
-    $cmake_defines = ($cmake_defines | append [
-        $"-DONNX_CUSTOM_PROTOC_EXECUTABLE=($env.BUILD_PREFIX)/bin/protoc"
-    ])
-    if $cross_compiling and $is_linux {
-        # On Linux/glibc, iconv is built into libc. During cross-compilation,
-        # CMake's FindIconv can't run its try_compile test to detect this and
-        # falls back to finding the wrong-architecture libiconv from BUILD_PREFIX.
-        $cmake_defines = ($cmake_defines | append "-DIconv_IS_BUILT_IN=TRUE")
+# Cross-compilation can't run the host python, so point cmake at the target's
+# python/numpy. https://conda-forge.org/docs/how-to/advanced/cross-compilation/#finding-numpy-in-cross-compiled-python-packages-using-cmake
+if $cross_compiling {
+    let python_include_dir = (python -c "import sysconfig; print(sysconfig.get_path('include'))" | str trim)
+    let numpy_include_dir = (python -c "import numpy; print(numpy.get_include())" | str trim)
+    $cmake_defines ++= [
+        $"Python_EXECUTABLE:PATH=($env.BUILD_PREFIX)/bin/python"
+        $"Python_INCLUDE_DIR:PATH=($python_include_dir)"
+        $"Python_NumPy_INCLUDE_DIR=($numpy_include_dir)"
+    ]
+    if $is_linux {
+        # glibc has iconv built in, but FindIconv's try_compile can't run when
+        # cross-compiling and picks the wrong-arch libiconv from BUILD_PREFIX.
+        $cmake_defines ++= ["Iconv_IS_BUILT_IN=TRUE"]
     }
 }
 
-# CUDA configuration
+# build.py flags; mirrors upstream build.sh / bld.bat. --no_telemetry is required
+# since 1.29.0 (telemetry defaults on for native builds). --build_wheel enables the
+# pybind11 target that the Python stage later rebuilds.
+mut build_py_args = [
+    "--build_dir" "build-ci"
+    "--config" "Release"
+    "--update"  # configure only; cmake --build below does the actual build
+    "--cmake_generator" "Ninja"
+    "--compile_no_warning_as_error"
+    "--enable_lto"
+    "--skip_pip_install"
+    "--skip_submodule_sync"
+    "--no_telemetry"
+    "--build_wheel"
+]
+
+# CoreML EP, statically linked into libonnxruntime (osx-x86_64 is skipped).
+if $is_osx {
+    $build_py_args ++= ["--use_coreml" "--osx_arch" "arm64"]
+}
+
+if not $is_win {
+    $build_py_args ++= ["--path_to_protoc_exe" $"($env.BUILD_PREFIX)/bin/protoc"]
+}
+
 if $cuda_enabled {
     let cuda_arch_list = if $is_win {
         match $cuda_version {
-            # SM 100+ (Blackwell) triggers a broken asm in CUDA 12.9
-            # clusterlaunchcontrol.h on Windows (long is 32-bit under MSVC),
-            # fixed in 13.0. SM 110 (Thor) is Linux-only.
+            # SM 100+ (Blackwell) hits a broken CUDA 12.9 asm on Windows (32-bit
+            # long under MSVC), fixed in 13.0. SM 110 (Thor) is Linux-only.
             "12.9" => "70-real;75-real;80-real;86-real;89-real;90-real"
             "13.0" => "75-real;80-real;86-real;89-real;90-real;100-real;120"
             _ => { error make {msg: $"No CUDA architecture list for v($cuda_version). See build-cpp.nu."} }
@@ -99,68 +104,51 @@ if $cuda_enabled {
             _ => { error make {msg: $"No CUDA architecture list for v($cuda_version). See build-cpp.nu."} }
         }
     }
-    $env.NINJAJOBS = "1"
-    # The fpA_intB_gemm/fpA_intB_gemv cutlass kernels added in 1.29.0 need several GB
-    # of RAM per architecture in nvcc, and the arch lists ask for up to eight of them.
-    # Compile one architecture at a time per translation unit so peak memory scales
-    # with --parallel alone and the runners don't OOM (exit 137).
-    $cmake_defines = ($cmake_defines | append "-Donnxruntime_NVCC_THREADS=1")
+    $cmake_defines ++= [$"CMAKE_CUDA_ARCHITECTURES=($cuda_arch_list)"]
 
     if $is_win {
-        let build_lib_prefix = $"($env.BUILD_PREFIX)/Library"
-        # Add nvcc to PATH so cmake can find it (matches build.py behavior).
-        # On Windows nushell exposes the path as a list named `Path`; assigning a
-        # string to `PATH` shadows it with a broken value and cl.exe disappears.
-        $env.Path = ($env.Path | prepend $"($build_lib_prefix)/bin")
-        $cmake_defines = ($cmake_defines | append [
-            "-Donnxruntime_USE_CUDA=ON"
-            $"-Donnxruntime_CUDA_HOME=($env.LIBRARY_PREFIX)"
-            $"-Donnxruntime_CUDNN_HOME=($env.LIBRARY_PREFIX)"
-            $"-DCMAKE_CUDA_ARCHITECTURES=($cuda_arch_list)"
-        ])
+        # nvcc must be on PATH for the cmake --build step. Nushell exposes it as
+        # the list `Path`; assigning to `PATH` shadows it and loses cl.exe.
+        $env.Path = ($env.Path | prepend $"($env.BUILD_PREFIX)/Library/bin")
+        $build_py_args ++= [
+            "--use_cuda" "--nvcc_threads=2"
+            "--cuda_home" $env.LIBRARY_PREFIX
+            "--cudnn_home" $env.LIBRARY_PREFIX
+        ]
     } else {
         let cuda_target = match $env.target_platform {
             "linux-64" => "x86_64-linux"
             "linux-aarch64" => "sbsa-linux"
             _ => { error make {msg: $"Unknown CUDA target for ($env.target_platform)"} }
         }
+        # nvcc lives in $BUILD_PREFIX/bin, not $CUDA_HOME/bin, in conda-forge CUDA 12.
         $env.CUDA_HOME = $"($env.BUILD_PREFIX)/targets/($cuda_target)"
-        # onnxruntime_CUDA_HOME sets CUDAToolkit_ROOT for find_package(CUDAToolkit).
-        # Point it to the host prefix where libcublas-dev etc. install their headers.
-        let cuda_toolkit_root = $"($env.PREFIX)/targets/($cuda_target)"
-        $cmake_defines = ($cmake_defines | append [
-            "-Donnxruntime_USE_CUDA=ON"
-            $"-Donnxruntime_CUDA_HOME=($cuda_toolkit_root)"
-            $"-Donnxruntime_CUDNN_HOME=($env.PREFIX)"
-            $"-DCMAKE_CUDA_COMPILER=($env.BUILD_PREFIX)/bin/nvcc"
-            $"-DCMAKE_CUDA_ARCHITECTURES=($cuda_arch_list)"
-            # Once enable_language(CUDA) runs, FindCUDAToolkit derives the toolkit
-            # location from nvcc (in BUILD_PREFIX) and ignores CUDAToolkit_ROOT.
-            # Explicitly set the include dir to the host prefix where libcublas-dev
-            # etc. install their headers.
-            $"-DCUDAToolkit_ROOT=($cuda_toolkit_root)"
-            $"-DCMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES=($cuda_toolkit_root)/include"
-        ])
+        # nvcc_threads=1: the 1.29.0 fpA_intB cutlass kernels need several GB per arch;
+        # more threads OOM-kill the runners (exit 137).
+        $build_py_args ++= [
+            "--use_cuda" "--nvcc_threads=1"
+            "--cuda_home" $env.CUDA_HOME
+            "--cudnn_home" $env.PREFIX
+        ]
+        $cmake_defines ++= [$"CMAKE_CUDA_COMPILER=($env.BUILD_PREFIX)/bin/nvcc"]
     }
 }
 
-# Configure
-cmake -S cmake -B build-ci/Release -G Ninja --compile-no-warning-as-error ...$cmake_defines
+# Configure only (--update); build.py generates the cache + Ninja tree.
+python tools/ci_build/build.py ...$build_py_args --cmake_extra_defines ...$cmake_defines
 
-# Build
+# Build and install the C++ library, reusing build.py's cache. The artifacts stay
+# in place for the per-Python stage, which rebuilds only the pybind11 module.
 cmake --build build-ci/Release --config Release --parallel $env.CPU_COUNT
 
-# # Run tests
 if not $cross_compiling {
-   ctest -V -C Release --test-dir build-ci/Release
+    ctest -V -C Release --test-dir build-ci/Release
 }
 
-# Install
-let lib_prefix = if $is_win { $env.LIBRARY_PREFIX } else { $env.PREFIX }
-cmake --install build-ci/Release --prefix $lib_prefix
+cmake --install build-ci/Release --prefix $prefix_path
 
-# Workaround: give Windows time to release file handles before rattler-build
-# tries to remove the work directory. See https://github.com/prefix-dev/rattler-build/issues/1431
+# Give Windows time to release file handles before rattler-build removes the work
+# directory. https://github.com/prefix-dev/rattler-build/issues/1431
 if $is_win {
     sleep 30sec
 }

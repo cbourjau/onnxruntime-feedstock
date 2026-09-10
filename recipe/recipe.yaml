@@ -217,6 +217,14 @@ outputs:
     build:
       number: ${{ build_number }}
       string: py${{ python | version_to_buildstring }}h${{ hash }}_${{ build_number }}_${{ build_ext }}
+      # Ship only the Python package. The C++ library, headers and cmake config
+      # that the build stage installed into the shared prefix belong to
+      # onnxruntime-cpp; without this filter the Python output would duplicate all
+      # of it (including a second ~29 MiB copy of libonnxruntime). The wheel already
+      # bundles its own libonnxruntime under capi/, so nothing here is missing.
+      files:
+        include:
+          - ${{ "Lib/site-packages/**" if win else "lib/python*/site-packages/**" }}
       script:
         interpreter: nu
         env:

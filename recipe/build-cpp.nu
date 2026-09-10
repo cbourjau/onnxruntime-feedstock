@@ -146,9 +146,3 @@ if not $cross_compiling {
 }
 
 cmake --install build-ci/Release --prefix $prefix_path
-
-# Give Windows time to release file handles before rattler-build removes the work
-# directory. https://github.com/prefix-dev/rattler-build/issues/1431
-if $is_win {
-    sleep 30sec
-}
